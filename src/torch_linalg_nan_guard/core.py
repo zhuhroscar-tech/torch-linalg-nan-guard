@@ -118,15 +118,21 @@ class NanPlacementCase:
                                  # mode and is not counted as the bug
     buggy_result_is_finite: bool
     buggy_result: List[float]
-    reference_result: List[float]  # the sibling full-decomposition's result
-    reference_has_nan: bool
+    reference_raised: bool      # the sibling full-decomposition op also
+                                 # raised instead of returning a result
+                                 # (seen on some LAPACK backends, e.g.
+                                 # Linux/OpenBLAS is stricter than macOS/
+                                 # Accelerate about non-finite input)
+    reference_result: List[float]  # empty if reference_raised
+    reference_has_nan: bool         # False (not True) if reference_raised
     guard_raises: bool
 
 
-def _run_buggy(fn) -> tuple:
-    """Run the unguarded op; some NaN placements make the LAPACK routine
-    itself fail to converge (a loud, non-silent error) rather than
-    silently returning a finite result. Return (raised, is_finite, values)."""
+def _run_maybe_raising(fn) -> tuple:
+    """Run an op that may itself raise for non-finite input (this varies
+    by LAPACK backend -- observed to differ between macOS/Accelerate and
+    Linux/OpenBLAS for the exact same torch version and code). Returns
+    (raised, is_finite_or_False, values_or_empty)."""
     try:
         result = fn()
     except Exception:
@@ -138,8 +144,11 @@ def _svdvals_case(torch_module, size: int, pos: int) -> NanPlacementCase:
     M = torch_module.diag(torch_module.arange(1, size + 1, dtype=torch_module.float64))
     M[pos, pos] = float("nan")
 
-    buggy_raised, buggy_finite, buggy_values = _run_buggy(lambda: torch_module.linalg.svdvals(M))
-    ref = torch_module.linalg.svd(M).S
+    buggy_raised, buggy_finite, buggy_values = _run_maybe_raising(lambda: torch_module.linalg.svdvals(M))
+    ref_raised, _, ref_values = _run_maybe_raising(lambda: torch_module.linalg.svd(M).S)
+    ref_has_nan = False
+    if not ref_raised:
+        ref_has_nan = bool(torch_module.isnan(torch_module.tensor(ref_values)).any().item())
 
     guard_raised = False
     try:
@@ -154,8 +163,9 @@ def _svdvals_case(torch_module, size: int, pos: int) -> NanPlacementCase:
         buggy_raised=buggy_raised,
         buggy_result_is_finite=buggy_finite,
         buggy_result=buggy_values,
-        reference_result=ref.tolist(),
-        reference_has_nan=bool(torch_module.isnan(ref).any().item()),
+        reference_raised=ref_raised,
+        reference_result=ref_values,
+        reference_has_nan=ref_has_nan,
         guard_raises=guard_raised,
     )
 
@@ -164,8 +174,11 @@ def _eigvalsh_case(torch_module, size: int, pos: int) -> NanPlacementCase:
     M = torch_module.diag(torch_module.arange(1, size + 1, dtype=torch_module.float64))
     M[pos, pos] = float("nan")
 
-    buggy_raised, buggy_finite, buggy_values = _run_buggy(lambda: torch_module.linalg.eigvalsh(M))
-    ref, _ = torch_module.linalg.eigh(M)
+    buggy_raised, buggy_finite, buggy_values = _run_maybe_raising(lambda: torch_module.linalg.eigvalsh(M))
+    ref_raised, _, ref_values = _run_maybe_raising(lambda: torch_module.linalg.eigh(M)[0])
+    ref_has_nan = False
+    if not ref_raised:
+        ref_has_nan = bool(torch_module.isnan(torch_module.tensor(ref_values)).any().item())
 
     guard_raised = False
     try:
@@ -180,8 +193,9 @@ def _eigvalsh_case(torch_module, size: int, pos: int) -> NanPlacementCase:
         buggy_raised=buggy_raised,
         buggy_result_is_finite=buggy_finite,
         buggy_result=buggy_values,
-        reference_result=ref.tolist(),
-        reference_has_nan=bool(torch_module.isnan(ref).any().item()),
+        reference_raised=ref_raised,
+        reference_result=ref_values,
+        reference_has_nan=ref_has_nan,
         guard_raises=guard_raised,
     )
 

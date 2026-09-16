@@ -90,7 +90,7 @@ was re-run from scratch on the currently installed torch build (not
 just cited from the issue tracker):
 
 ```
-torch 2.14.0
+torch 2.14.0 (macOS, Accelerate/vecLib LAPACK backend)
 svdvals(M): tensor([1., 1.], dtype=torch.float64)      <- bug reproduces
 svd(M).S:   tensor([1., nan], dtype=torch.float64)
 ```
@@ -104,6 +104,23 @@ default was checked as the intended-behavior baseline: SciPy raises
 `ValueError: array must not contain infs or NaNs` for the same input,
 confirming NaN-refusal (not silent computation) is the established
 correct behavior this package's guard replicates for torch.
+
+**LAPACK backend matters, confirmed by this project's own CI (a real
+finding, not assumed):** the same torch version's `svdvals`/`eigvalsh`
+NaN behavior is backend-dependent. On this development host (macOS,
+Accelerate/vecLib), the silent-finite-result bug reproduces exactly as
+pytorch/pytorch#187759 describes. On `ubuntu-latest` CI (OpenBLAS),
+`torch.linalg.svd()` itself raises `_LinAlgError: ... input matrix
+contained non-finite values` for the identical input, rather than
+silently succeeding -- a stricter, already-loud failure rather than
+the silent one. The `eigvalsh`/`eigh` pair still exhibits the silent
+bug on Linux/OpenBLAS for several diagonal-NaN placements (confirmed
+in CI logs). Either way, **the guard's job is unconditional**: raise a
+clear `ValueError` before ever calling the underlying LAPACK routine,
+regardless of which backend-specific behavior the unguarded call would
+otherwise exhibit. The test suite and `diagnose()` output both record
+this distinction explicitly (`buggy_raised` / `reference_raised`
+fields) rather than assuming one platform's behavior universally.
 
 ## Reproducible build & test
 

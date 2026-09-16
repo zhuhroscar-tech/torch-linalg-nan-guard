@@ -86,7 +86,7 @@ def main(argv=None) -> int:
             [
                 (
                     f"{c['op']} n={c['size']} pos={c['nan_position']}",
-                    f"{flag:15s}  reference_has_nan={c['reference_has_nan']!s:5s}  {guard_flag}",
+                    f"{flag:15s}  ref_nan={c['reference_has_nan']!s:5s}  ref_raised={c['reference_raised']!s:5s}  {guard_flag}",
                 )
             ]
         )
