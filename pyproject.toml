@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-linalg-nan-guard"
+version = "0.1.0"
+description = "Detect and safely guard against torch.linalg.svdvals()/eigvalsh() silently swallowing NaN (pytorch/pytorch#187759, numpy/numpy#20280)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "zhuhroscar-tech" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+torch = ["torch>=2.0"]
+
+[project.scripts]
+torch-linalg-nan-guard = "torch_linalg_nan_guard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
