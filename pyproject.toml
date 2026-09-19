@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-linalg-nan-guard"
-version = "0.1.0"
-description = "Detect and safely guard against torch.linalg.svdvals()/eigvalsh() silently swallowing NaN (pytorch/pytorch#187759, numpy/numpy#20280)"
+version = "0.2.0"
+description = "Detect and safely guard against torch.linalg.svdvals()/eigvalsh() silently swallowing NaN (pytorch/pytorch#187759, numpy/numpy#20280) and torch.linalg.vector_norm()/torch.norm() silently losing precision or overflowing to inf for float16/bfloat16/float32 input (pytorch/pytorch#169237, #193006)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"

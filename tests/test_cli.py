@@ -44,20 +44,38 @@ def test_version_flag(capsys):
 
 def test_json_output_is_valid_json_and_reports_guard_status(capsys):
     torch = pytest.importorskip("torch")
-    code = main(["--json"])
+    code = main(["--json", "--skip-norm-check"])
     out = capsys.readouterr().out
-    report = json.loads(out)
+    report = json.loads(out)["nan_swallowing"]
     assert "torch_version" in report
     assert report["torch_version"] == torch.__version__
     assert "guard_fully_effective" in report
     assert code in (0, 1)
 
 
-def test_json_exit_code_matches_guard_fully_effective(capsys):
+def test_json_output_includes_norm_precision_by_default(capsys):
     pytest.importorskip("torch")
     code = main(["--json"])
     out = capsys.readouterr().out
-    report = json.loads(out)
+    payload = json.loads(out)
+    assert "norm_precision" in payload
+    assert "guard_fully_effective" in payload["norm_precision"]
+    assert code in (0, 1)
+
+
+def test_json_skip_norm_check_omits_norm_precision_key(capsys):
+    pytest.importorskip("torch")
+    main(["--json", "--skip-norm-check"])
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert "norm_precision" not in payload
+
+
+def test_json_exit_code_matches_guard_fully_effective(capsys):
+    pytest.importorskip("torch")
+    code = main(["--json", "--skip-norm-check"])
+    out = capsys.readouterr().out
+    report = json.loads(out)["nan_swallowing"]
     assert code == (0 if report["guard_fully_effective"] else 1)
 
 
@@ -70,10 +88,26 @@ def test_text_output_no_color_has_no_ansi_escapes(capsys):
 
 def test_text_output_reports_per_case_results(capsys):
     pytest.importorskip("torch")
-    main(["--no-color"])
+    main(["--no-color", "--skip-norm-check"])
     out = capsys.readouterr().out
     assert "torch version" in out
     assert "per-case results" in out
+
+
+def test_text_output_reports_norm_precision_section_by_default(capsys):
+    pytest.importorskip("torch")
+    main(["--no-color"])
+    out = capsys.readouterr().out
+    assert "vector_norm / torch.norm precision-and-overflow check" in out
+    assert "vector_norm numel=" in out
+    assert "large-magnitude overflow case" in out
+
+
+def test_skip_norm_check_omits_norm_precision_section(capsys):
+    pytest.importorskip("torch")
+    main(["--no-color", "--skip-norm-check"])
+    out = capsys.readouterr().out
+    assert "precision-and-overflow check" not in out
 
 
 def test_torch_unavailable_json_mode_reports_error_and_exit_2(monkeypatch, capsys):
@@ -110,7 +144,7 @@ def test_no_bug_present_prints_info_line(monkeypatch, capsys):
     """cli.py line 63: the 'info' (not 'warn') branch when the host's
     torch build does NOT reproduce the NaN-swallowing bug."""
     monkeypatch.setattr(core, "diagnose", lambda: _fake_report())
-    main(["--no-color"])
+    main(["--no-color", "--skip-norm-check"])
     out = capsys.readouterr().out
     assert "bug NOT reproduced on this host's installed torch build (fixed upstream)" in out
     assert "bug reproduced on this host's installed torch build" not in out
@@ -120,7 +154,7 @@ def test_bug_present_prints_warn_line(monkeypatch, capsys):
     """Positive-branch companion: when the bug IS reproduced, the
     'warn' headline fires instead (line 61)."""
     monkeypatch.setattr(core, "diagnose", lambda: _fake_report(any_bug_present=True))
-    main(["--no-color"])
+    main(["--no-color", "--skip-norm-check"])
     out = capsys.readouterr().out
     assert "bug reproduced on this host's installed torch build" in out
 
@@ -129,7 +163,7 @@ def test_guard_mismatch_prints_fail_line_and_exit_1(monkeypatch, capsys):
     """cli.py line 74 + 94: guard_fully_effective=False prints the
     'fail' headline (not the 'ok' one) and the process exits 1."""
     monkeypatch.setattr(core, "diagnose", lambda: _fake_report(guard_fully_effective=False))
-    code = main(["--no-color"])
+    code = main(["--no-color", "--skip-norm-check"])
     out = capsys.readouterr().out
     assert "guard did NOT catch at least one NaN case" in out
     assert "catch every tested NaN case" not in out
@@ -141,8 +175,90 @@ def test_module_entry_point_runs_main_and_exits_with_its_code(monkeypatch):
     running the module as a script must invoke main() and propagate its
     return code via SystemExit, not just be dead code."""
     monkeypatch.setattr(core, "diagnose", lambda: _fake_report(guard_fully_effective=False))
-    monkeypatch.setattr(sys, "argv", ["torch-linalg-nan-guard", "--no-color"])
+    monkeypatch.setattr(sys, "argv", ["torch-linalg-nan-guard", "--no-color", "--skip-norm-check"])
     monkeypatch.delitem(sys.modules, "torch_linalg_nan_guard.cli", raising=False)
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("torch_linalg_nan_guard.cli", run_name="__main__")
     assert exc_info.value.code == 1
+
+
+def _fake_norm_report(**overrides):
+    report = {
+        "torch_version": "9.9.9-fake",
+        "issue_urls": [
+            "https://github.com/pytorch/pytorch/issues/169237",
+            "https://github.com/pytorch/pytorch/issues/193006",
+        ],
+        "precision_cases": [
+            {
+                "numel": 1000,
+                "unguarded_result": 1.0,
+                "guarded_result": 1.0,
+                "reference_result": 1.0,
+                "unguarded_rel_err": 0.0,
+                "guarded_rel_err": 0.0,
+                "unguarded_is_inf": False,
+            }
+        ],
+        "overflow_case": {
+            "numel": 8,
+            "unguarded_result": float("inf"),
+            "guarded_result": 1.0e30,
+            "reference_result": 1.0e30,
+            "unguarded_rel_err": float("inf"),
+            "guarded_rel_err": 0.0,
+            "unguarded_is_inf": True,
+        },
+        "any_precision_loss_present": False,
+        "any_overflow_present": True,
+        "guard_fully_effective": True,
+    }
+    report.update(overrides)
+    return report
+
+
+def test_norm_bug_not_reproduced_prints_info_line(monkeypatch, capsys):
+    monkeypatch.setattr(core, "diagnose", lambda: _fake_report())
+    monkeypatch.setattr(
+        core,
+        "diagnose_norm_precision",
+        lambda: _fake_norm_report(any_overflow_present=False),
+    )
+    main(["--no-color"])
+    out = capsys.readouterr().out
+    assert "float32 accumulator bug NOT reproduced on this host's installed torch build (fixed upstream)" in out
+
+
+def test_norm_bug_reproduced_prints_warn_line(monkeypatch, capsys):
+    monkeypatch.setattr(core, "diagnose", lambda: _fake_report())
+    monkeypatch.setattr(core, "diagnose_norm_precision", lambda: _fake_norm_report())
+    main(["--no-color"])
+    out = capsys.readouterr().out
+    assert "float32 accumulator precision/overflow bug reproduced on this host's installed torch build" in out
+
+
+def test_norm_guard_mismatch_prints_fail_line_and_exit_1(monkeypatch, capsys):
+    monkeypatch.setattr(core, "diagnose", lambda: _fake_report())
+    monkeypatch.setattr(
+        core,
+        "diagnose_norm_precision",
+        lambda: _fake_norm_report(guard_fully_effective=False),
+    )
+    code = main(["--no-color"])
+    out = capsys.readouterr().out
+    assert "guard did NOT match the float64 reference at every tested size" in out
+    assert code == 1
+
+
+def test_norm_json_exit_code_reflects_norm_guard_failure(monkeypatch, capsys):
+    monkeypatch.setattr(core, "diagnose", lambda: _fake_report())
+    monkeypatch.setattr(
+        core,
+        "diagnose_norm_precision",
+        lambda: _fake_norm_report(guard_fully_effective=False),
+    )
+    code = main(["--json"])
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["norm_precision"]["guard_fully_effective"] is False
+    assert code == 1

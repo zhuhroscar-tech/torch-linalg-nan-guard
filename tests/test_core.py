@@ -14,7 +14,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from torch_linalg_nan_guard.core import diagnose, safe_eigvalsh, safe_svdvals
+from torch_linalg_nan_guard.core import (
+    diagnose,
+    diagnose_norm_precision,
+    safe_eigvalsh,
+    safe_norm,
+    safe_svdvals,
+    safe_vector_norm,
+)
 
 
 class TestSafeSvdvals:
@@ -116,3 +123,158 @@ class TestDiagnose:
                     "reference full-decomposition op returned a finite "
                     f"result for NaN input -- unexpected: {case}"
                 )
+
+
+class TestNormPrecisionNativeBugReproduction:
+    """Proves the underlying float32-accumulator bug (pytorch/pytorch
+    #169237, #193006) is real and reproducible from scratch on this
+    host's installed torch build -- an independent float64 oracle, not
+    a value trusted from the upstream issue thread."""
+
+    def test_unguarded_vector_norm_diverges_from_float64_reference_at_16m_elements(self):
+        torch.manual_seed(0)
+        x64 = torch.rand(16_000_000, dtype=torch.float64)
+        reference = torch.linalg.vector_norm(x64, ord=2).item()
+        x32 = x64.to(torch.float32)
+        unguarded = torch.linalg.vector_norm(x32, ord=2).item()
+        rel_err = abs(unguarded - reference) / reference
+        # This is the actual native-bug reproduction: if a future torch
+        # release fixes this upstream, this assertion should start
+        # failing loudly (rel_err near float32 eps), which is exactly
+        # the signal that the guard's diagnose_norm_precision() call
+        # should also stop reporting any_precision_loss_present. This
+        # test intentionally does NOT use the guard -- it is checking
+        # torch's OWN behavior, matching this repo's evidence-before-
+        # acceptance policy of never trusting a cached bug report.
+        assert rel_err > 1e-4, (
+            f"expected the known float32 CPU L2-norm accumulator bug to reproduce "
+            f"(rel_err={rel_err:.3e}); if this now passes, the upstream bug may be "
+            f"fixed in torch {torch.__version__} and this guard's rationale should "
+            f"be re-verified"
+        )
+
+    def test_naive_finite_only_check_would_miss_the_precision_loss_bug(self):
+        # Mirrors this module's existing bug-injection-non-tautological
+        # pattern (see torch-compile-std-precision-guard's equivalent
+        # test): a check that only asks "is the result finite?" passes
+        # on the precision-loss variant even though the *value* is
+        # wrong by orders of magnitude more than float32 rounding could
+        # explain -- proving finiteness alone is not a sufficient
+        # correctness check for this bug class.
+        torch.manual_seed(0)
+        x64 = torch.rand(16_000_000, dtype=torch.float64)
+        x32 = x64.to(torch.float32)
+        unguarded = torch.linalg.vector_norm(x32, ord=2).item()
+        assert math.isfinite(unguarded)  # the naive check "passes"...
+        reference = torch.linalg.vector_norm(x64, ord=2).item()
+        rel_err = abs(unguarded - reference) / reference
+        assert rel_err > 1e-4  # ...even though the value is badly wrong
+
+    def test_unguarded_vector_norm_overflows_to_inf_for_large_magnitude_input(self):
+        torch.manual_seed(0)
+        x = (torch.rand(8, dtype=torch.float32) + 0.5) * 1e30
+        unguarded = torch.linalg.vector_norm(x, ord=2).item()
+        assert math.isinf(unguarded)
+
+    def test_overflow_case_gradient_is_silently_all_zero(self):
+        # The dangerous consequence, not just the forward-value bug:
+        # backward() divides by the inf norm and silently zeroes the
+        # gradient, with no error or warning.
+        torch.manual_seed(0)
+        x = ((torch.rand(8, dtype=torch.float32) + 0.5) * 1e30).requires_grad_(True)
+        norm = torch.linalg.vector_norm(x, ord=2)
+        assert math.isinf(norm.item())
+        (grad,) = torch.autograd.grad(norm, x)
+        assert torch.all(grad == 0.0)
+
+
+class TestSafeVectorNormMatchesReference:
+    """Proves the guard actually fixes both bug variants, against an
+    independent float64 oracle -- and is a transparent pass-through
+    for input the bug does not affect."""
+
+    def test_guarded_matches_float64_reference_at_16m_elements(self):
+        torch.manual_seed(0)
+        x64 = torch.rand(16_000_000, dtype=torch.float64)
+        reference = torch.linalg.vector_norm(x64, ord=2).item()
+        x32 = x64.to(torch.float32)
+        guarded = safe_vector_norm(x32, ord=2).item()
+        rel_err = abs(guarded - reference) / reference
+        assert rel_err < 1e-6, f"guard should closely match float64 reference, got rel_err={rel_err:.3e}"
+
+    def test_guarded_does_not_overflow_for_large_magnitude_input(self):
+        torch.manual_seed(0)
+        x = (torch.rand(8, dtype=torch.float32) + 0.5) * 1e30
+        guarded = safe_vector_norm(x, ord=2).item()
+        assert math.isfinite(guarded)
+
+    def test_guarded_preserves_nonzero_gradient_for_large_magnitude_input(self):
+        torch.manual_seed(0)
+        x = ((torch.rand(8, dtype=torch.float32) + 0.5) * 1e30).requires_grad_(True)
+        norm = safe_vector_norm(x, ord=2)
+        assert math.isfinite(norm.item())
+        (grad,) = torch.autograd.grad(norm, x)
+        assert torch.any(grad != 0.0)
+
+    def test_guarded_output_dtype_matches_input_dtype(self):
+        torch.manual_seed(0)
+        x = torch.rand(100, dtype=torch.float32)
+        assert safe_vector_norm(x, ord=2).dtype == torch.float32
+
+    def test_guarded_transparent_for_float64_input(self):
+        torch.manual_seed(0)
+        x = torch.rand(100, dtype=torch.float64)
+        expected = torch.linalg.vector_norm(x, ord=2)
+        actual = safe_vector_norm(x, ord=2)
+        assert torch.equal(actual, expected)
+
+    def test_guarded_transparent_for_non_l2_ord(self):
+        torch.manual_seed(0)
+        x = torch.rand(100, dtype=torch.float32)
+        expected = torch.linalg.vector_norm(x, ord=1)
+        actual = safe_vector_norm(x, ord=1)
+        assert torch.equal(actual, expected)
+
+    def test_guarded_matches_unguarded_exactly_on_small_finite_input(self):
+        torch.manual_seed(0)
+        x = torch.rand(10, dtype=torch.float32)
+        expected = torch.linalg.vector_norm(x, ord=2)
+        actual = safe_vector_norm(x, ord=2)
+        assert torch.allclose(actual, expected, atol=1e-4)
+
+    def test_safe_norm_matches_safe_vector_norm_for_default_fro(self):
+        torch.manual_seed(0)
+        x = (torch.rand(8, dtype=torch.float32) + 0.5) * 1e30
+        via_norm = safe_norm(x)
+        via_vector_norm = safe_vector_norm(x, ord=2)
+        assert torch.equal(via_norm, via_vector_norm)
+
+    def test_safe_norm_transparent_for_non_l2_p(self):
+        torch.manual_seed(0)
+        x = torch.rand(100, dtype=torch.float32)
+        expected = torch.norm(x, p=1)
+        actual = safe_norm(x, p=1)
+        assert torch.equal(actual, expected)
+
+
+class TestDiagnoseNormPrecision:
+    def test_diagnose_runs_and_reports_consistent_structure(self):
+        report = diagnose_norm_precision(numels=(1_000, 100_000))
+        assert report["torch_version"] == torch.__version__
+        assert len(report["precision_cases"]) == 2
+        assert "overflow_case" in report
+
+    def test_guard_fully_effective_flag_is_true(self):
+        report = diagnose_norm_precision(numels=(1_000, 100_000))
+        assert report["guard_fully_effective"] is True
+
+    def test_any_precision_loss_present_reflects_native_bug_at_realistic_scale(self):
+        # At 16M elements the native bug is large and reliable (see
+        # TestNormPrecisionNativeBugReproduction); the diagnosis at this
+        # scale should agree with the from-scratch reproduction above.
+        report = diagnose_norm_precision(numels=(16_000_000,))
+        assert report["any_precision_loss_present"] is True
+
+    def test_any_overflow_present_reflects_native_overflow_bug(self):
+        report = diagnose_norm_precision(numels=(1_000,))
+        assert report["any_overflow_present"] is True
